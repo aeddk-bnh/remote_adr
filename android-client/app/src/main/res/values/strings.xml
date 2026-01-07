@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ARCS Remote</string>
+    <string name="settings">Settings</string>
+    <string name="accessibility_service_description">
+        Allows ARCS to inject touch gestures and control the device remotely.
+        This service is required for remote control functionality.
+    </string>
+    <string name="notification_channel_name">Remote Control Service</string>
+    <string name="notification_channel_description">Shows status of remote control service</string>
+</resources>

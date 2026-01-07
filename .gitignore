@@ -1,0 +1,72 @@
+/.gradle
+/build
+/android-client/.gradle
+/android-client/.idea
+/android-client/local.properties
+/android-client/app/build
+**/node_modules
+/web-controller/node_modules
+/mock-server/node_modules
+/android-client/*.iml
+*.log
+*.keystore
+.DS_Store
+.idea/
+.vscode/# Android
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.ap_
+*.dex
+*.class
+
+# Gradle
+.gradle/
+build/
+out/
+
+# Server
+server/build/
+server/*.o
+server/*.so
+server/arcs-server
+
+# PC Controller
+controller-pc/build/
+controller-pc/*.o
+controller-pc/arcs-controller
+
+# Web Controller
+controller-web/node_modules/
+controller-web/dist/
+controller-web/.env.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Secrets
+*.key
+*.pem
+secrets/
+.env
+gradle-8.2/
+gradle-8.2-bin.zip
+*.hprof

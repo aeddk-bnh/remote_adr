@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  # ARCS Server
+  arcs-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: arcs-server
+    ports:
+      - "8080:8080"
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret-key}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MAX_SESSIONS=${MAX_SESSIONS:-100}
+    volumes:
+      - ./data/server:/app/data
+      - ./logs/server:/app/logs
+    restart: unless-stopped
+    networks:
+      - arcs-network
+
+  # Web Controller
+  arcs-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: arcs-web
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_DEFAULT_SERVER_URL=ws://localhost:8080
+    depends_on:
+      - arcs-server
+    restart: unless-stopped
+    networks:
+      - arcs-network
+
+  # Reverse Proxy (Optional - for production)
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: arcs-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-proxy.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - arcs-server
+      - arcs-web
+    restart: unless-stopped
+    networks:
+      - arcs-network
+    profiles:
+      - production
+
+networks:
+  arcs-network:
+    driver: bridge
+
+volumes:
+  server-data:
+  server-logs:

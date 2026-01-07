@@ -1,0 +1,155 @@
+name: ARCS CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  JAVA_VERSION: '17'
+  NODE_VERSION: '18'
+
+jobs:
+  # Android Client Build
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          
+      - name: Grant execute permission for gradlew
+        run: chmod +x android-client/gradlew
+        
+      - name: Build Android APK
+        run: |
+          cd android-client
+          ./gradlew assembleDebug
+          
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-apk
+          path: android-client/app/build/outputs/apk/debug/*.apk
+
+  # Server Build
+  server-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev libsqlite3-dev libboost-all-dev uuid-dev
+          
+      - name: Build Server
+        run: |
+          cd server
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j$(nproc)
+          
+      - name: Upload Server Binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: server-binary
+          path: server/build/arcs-server
+
+  # Web Controller Build
+  web-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web-controller/package-lock.json
+          
+      - name: Install dependencies
+        run: |
+          cd web-controller
+          npm ci
+          
+      - name: Lint
+        run: |
+          cd web-controller
+          npm run lint
+          
+      - name: Type check
+        run: |
+          cd web-controller
+          npm run type-check
+          
+      - name: Build
+        run: |
+          cd web-controller
+          npm run build
+          
+      - name: Upload Build
+        uses: actions/upload-artifact@v3
+        with:
+          name: web-build
+          path: web-controller/dist/
+
+  # Docker Images
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [server-build, web-build]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          
+      - name: Build and push Server image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile.server
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/arcs-server:latest
+          
+      - name: Build and push Web image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile.web
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/arcs-web:latest
+
+  # Integration Tests
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: [android-build, server-build, web-build]
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Start services
+        run: docker-compose up -d
+        
+      - name: Wait for services
+        run: sleep 30
+        
+      - name: Health check
+        run: |
+          curl -f http://localhost:8080/health || exit 1
+          curl -f http://localhost:3000 || exit 1
+          
+      - name: Stop services
+        run: docker-compose down
