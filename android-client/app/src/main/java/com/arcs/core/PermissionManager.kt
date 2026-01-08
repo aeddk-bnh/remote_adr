@@ -64,14 +64,23 @@ class PermissionManager(private val context: Context) {
      * Check if Accessibility Service is enabled
      */
     fun isAccessibilityServiceEnabled(): Boolean {
-        val serviceName = "${context.packageName}/.accessibility.RemoteAccessibilityService"
-        
+        // Accessibility services may be listed in different forms depending on the device:
+        // - short form: "com.pkg/.accessibility.RemoteAccessibilityService"
+        // - long form:  "com.pkg/com.pkg.accessibility.RemoteAccessibilityService"
+        val shortName = "${context.packageName}/.accessibility.RemoteAccessibilityService"
+        val longName = "${context.packageName}/${context.packageName}.accessibility.RemoteAccessibilityService"
+
         val enabledServices = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         )
-        
-        return enabledServices?.contains(serviceName) == true
+
+        return when {
+            enabledServices == null -> false
+            enabledServices.contains(shortName) -> true
+            enabledServices.contains(longName) -> true
+            else -> false
+        }
     }
     
     /**
@@ -112,11 +121,18 @@ class PermissionManager(private val context: Context) {
      * Check all required permissions
      */
     fun checkAllPermissions(): PermissionStatus {
-        return PermissionStatus(
+        val status = PermissionStatus(
             hasNotificationPermission = hasNotificationPermission(),
             accessibilityServiceEnabled = isAccessibilityServiceEnabled(),
             imeEnabled = isIMEEnabled()
         )
+        Timber.d("PermissionStatus: hasNotification=%s, accessibility=%s, ime=%s, missing=%s",
+            status.hasNotificationPermission,
+            status.accessibilityServiceEnabled,
+            status.imeEnabled,
+            status.getMissingPermissions().joinToString(", ")
+        )
+        return status
     }
     
     /**

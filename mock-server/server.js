@@ -88,6 +88,40 @@ function handleJsonMessage(ws, message) {
             forwardToDevice(ws, message);
             break;
 
+        case 'command_result':
+            // ACK / result coming from device: echo to controllers in same session
+            console.log('[ACK] command_result from', message.sender || 'device', message);
+            // If this message came from a device connection, forward to controllers
+            const devInfo = devices.get(ws);
+            if (devInfo) {
+                const session = sessions.get(devInfo.sessionId);
+                if (session) {
+                    session.controllers.forEach(controllerWs => {
+                        if (controllerWs.readyState === WebSocket.OPEN) {
+                            try {
+                                controllerWs.send(JSON.stringify(message));
+                            } catch (e) {
+                                console.error('[ACK Forward] failed to send to controller', e.message);
+                            }
+                        }
+                    });
+                }
+            } else {
+                // If not from device, try to forward to device for debugging
+                const ctrlInfo = controllers.get(ws);
+                if (ctrlInfo) {
+                    const session = sessions.get(ctrlInfo.sessionId);
+                    if (session && session.device && session.device.readyState === WebSocket.OPEN) {
+                        try {
+                            session.device.send(JSON.stringify(message));
+                        } catch (e) {
+                            console.error('[ACK Forward] failed to send to device', e.message);
+                        }
+                    }
+                }
+            }
+            break;
+
         case 'pong':
             // Heartbeat response
             break;

@@ -16,6 +16,7 @@
     <!-- Wake lock for persistent service -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Allow cleartext during local testing (adb reverse). Set to true for debug builds only. -->
     <application
         android:name="com.arcs.client.ARCSApplication"
         android:allowBackup="false"
@@ -25,7 +26,8 @@
         android:roundIcon="@android:drawable/ic_dialog_info"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
         tools:targetApi="31">
 
         <!-- Main Activity -->

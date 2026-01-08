@@ -44,7 +44,10 @@ class RemoteAccessibilityService : AccessibilityService() {
      * Perform tap gesture
      */
     suspend fun performTap(x: Float, y: Float, duration: Long = 50): Boolean {
-        return performGesture(createTapGesture(x, y, duration))
+        Timber.d("performTap: start at (%s,%s) dur=%sms", x, y, duration)
+        val ok = performGesture(createTapGesture(x, y, duration))
+        Timber.i("performTap: completed success=%s at (%s,%s)", ok, x, y)
+        return ok
     }
     
     /**
@@ -57,14 +60,20 @@ class RemoteAccessibilityService : AccessibilityService() {
         endY: Float,
         duration: Long = 300
     ): Boolean {
-        return performGesture(createSwipeGesture(startX, startY, endX, endY, duration))
+        Timber.d("performSwipe: start=(%s,%s) end=(%s,%s) dur=%sms", startX, startY, endX, endY, duration)
+        val ok = performGesture(createSwipeGesture(startX, startY, endX, endY, duration))
+        Timber.i("performSwipe: completed success=%s from=(%s,%s) to=(%s,%s)", ok, startX, startY, endX, endY)
+        return ok
     }
     
     /**
      * Perform long press
      */
     suspend fun performLongPress(x: Float, y: Float, duration: Long = 1000): Boolean {
-        return performGesture(createTapGesture(x, y, duration))
+        Timber.d("performLongPress: at (%s,%s) dur=%sms", x, y, duration)
+        val ok = performGesture(createTapGesture(x, y, duration))
+        Timber.i("performLongPress: completed success=%s at (%s,%s)", ok, x, y)
+        return ok
     }
     
     /**
@@ -77,7 +86,10 @@ class RemoteAccessibilityService : AccessibilityService() {
         endDistance: Float,
         duration: Long = 500
     ): Boolean {
-        return performGesture(createPinchGesture(centerX, centerY, startDistance, endDistance, duration))
+        Timber.d("performPinch: center=(%s,%s) %s->%s dur=%sms", centerX, centerY, startDistance, endDistance, duration)
+        val ok = performGesture(createPinchGesture(centerX, centerY, startDistance, endDistance, duration))
+        Timber.i("performPinch: completed success=%s center=(%s,%s) %s->%s", ok, centerX, centerY, startDistance, endDistance)
+        return ok
     }
     
     /**
@@ -87,12 +99,14 @@ class RemoteAccessibilityService : AccessibilityService() {
         suspendCancellableCoroutine { continuation ->
             val callback = object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
+                    Timber.d("GestureResultCallback.onCompleted")
                     if (continuation.isActive) {
                         continuation.resume(true)
                     }
                 }
                 
                 override fun onCancelled(gestureDescription: GestureDescription?) {
+                    Timber.w("GestureResultCallback.onCancelled")
                     if (continuation.isActive) {
                         Timber.w("Gesture cancelled")
                         continuation.resume(false)

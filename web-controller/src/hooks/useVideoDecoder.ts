@@ -42,15 +42,15 @@ export function useVideoDecoder(canvasRef: RefObject<HTMLCanvasElement>) {
     console.log('Video decoder initialized')
   }, [canvasRef])
 
-  const decodeFrame = useCallback((data: ArrayBuffer) => {
+  const decodeFrame = useCallback((data: ArrayBuffer, isKey: boolean, timestamp: number) => {
     if (!decoderRef.current || decoderRef.current.state !== 'configured') {
       return
     }
 
     try {
       const chunk = new EncodedVideoChunk({
-        type: 'key', // Assume keyframe, should parse from packet header
-        timestamp: performance.now() * 1000,
+        type: isKey ? 'key' : 'delta',
+        timestamp: timestamp, // packet timestamp is in microseconds
         data: data,
       })
 
@@ -61,10 +61,11 @@ export function useVideoDecoder(canvasRef: RefObject<HTMLCanvasElement>) {
   }, [])
 
   useEffect(() => {
-    // Listen for video frames
+    // Listen for video frames (detail: { data: ArrayBuffer, isKey: boolean, timestamp: number })
     const handleVideoFrame = (event: Event) => {
-      const customEvent = event as CustomEvent<ArrayBuffer>
-      decodeFrame(customEvent.detail)
+      const customEvent = event as CustomEvent<{ data: ArrayBuffer, isKey: boolean, timestamp: number }>
+      const { data, isKey, timestamp } = customEvent.detail
+      decodeFrame(data, !!isKey, Number(timestamp))
     }
 
     window.addEventListener('videoframe', handleVideoFrame)

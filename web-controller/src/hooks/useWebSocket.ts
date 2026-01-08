@@ -48,21 +48,19 @@ export function useWebSocket() {
           if (typeof event.data === 'string') {
             try {
               const msg = JSON.parse(event.data)
-              if (msg.type === 'join_response') {
-                if (msg.success) {
-                  setConnected(true)
-                  if (msg.device_info) {
-                    setDeviceInfo({
-                      model: msg.device_info.model || 'Unknown',
-                      androidVersion: msg.device_info.android_version || 'Unknown',
-                      width: msg.video_config?.width || 1080,
-                      height: msg.video_config?.height || 2400,
-                    })
-                  }
-                  resolve()
-                } else {
-                  reject(new Error('Failed to join session'))
+              // The mock-server uses `session_joined` for successful joins.
+              if (msg.type === 'join_response' || msg.type === 'session_joined') {
+                // Accept either format; treat as success when session exists.
+                setConnected(true)
+                if (msg.device_info) {
+                  setDeviceInfo({
+                    model: msg.device_info.model || 'Unknown',
+                    androidVersion: msg.device_info.android_version || 'Unknown',
+                    width: msg.video_config?.width || 1080,
+                    height: msg.video_config?.height || 2400,
+                  })
                 }
+                resolve()
                 websocket.onmessage = originalOnMessage
               }
             } catch (e) {
@@ -147,10 +145,95 @@ export function useWebSocket() {
     }
   }
 
+  // Reassembly state for fragmented ARCS frames
+  const fragments = new Map<number, { total: number, parts: Map<number, Uint8Array>, timestamp: number, isKey: boolean }>()
+
   const handleBinaryMessage = async (blob: Blob) => {
-    // Binary video frames are handled by the video decoder
-    const arrayBuffer = await blob.arrayBuffer()
-    window.dispatchEvent(new CustomEvent('videoframe', { detail: arrayBuffer }))
+    const buffer = await blob.arrayBuffer()
+    const dv = new DataView(buffer)
+
+    // Minimal header validation: magic "ARCS"
+    try {
+      const magic = String.fromCharCode(
+        dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)
+      )
+      if (magic !== 'ARCS') {
+        console.warn('Received non-ARCS packet')
+        return
+      }
+
+      const version = dv.getUint8(4)
+      const type = dv.getUint8(5)
+      // Only handle video frame type (0x02)
+      if (type !== 0x02) return
+
+      const frameNum = dv.getUint32(6, false)
+      // timestamp is 8 bytes big-endian
+      const tsHigh = dv.getUint32(10, false)
+      const tsLow = dv.getUint32(14, false)
+      const timestamp = Number((BigInt(tsHigh) << 32n) | BigInt(tsLow))
+
+      const flags = dv.getUint8(18)
+      const payloadLen = dv.getUint32(19, false)
+
+      const isFragment = (flags & 0x04) !== 0
+      const isKey = (flags & 0x01) !== 0
+
+      let payloadOffset = 23
+      let fragmentIndex = 0
+      let totalFragments = 1
+
+      if (isFragment) {
+        // fragmentIndex (2 bytes) + totalFragments (2 bytes)
+        fragmentIndex = dv.getUint16(23, false)
+        totalFragments = dv.getUint16(25, false)
+        payloadOffset = 27
+      }
+
+      const payload = new Uint8Array(buffer, payloadOffset, payloadLen)
+
+      if (!isFragment) {
+        // Single-packet frame: dispatch directly
+        window.dispatchEvent(new CustomEvent('videoframe', { detail: { data: payload.buffer, isKey, timestamp } }))
+        return
+      }
+
+      // Fragmented frame: store and assemble when complete
+      let entry = fragments.get(frameNum)
+      if (!entry) {
+        entry = { total: totalFragments, parts: new Map(), timestamp, isKey }
+        fragments.set(frameNum, entry)
+      }
+
+      entry.parts.set(fragmentIndex, payload)
+
+      if (entry.parts.size === entry.total) {
+        // Reassemble
+        const partsArray: Uint8Array[] = []
+        for (let i = 0; i < entry.total; i++) {
+          const p = entry.parts.get(i)
+          if (!p) {
+            console.error('Missing fragment', i, 'for frame', frameNum)
+            fragments.delete(frameNum)
+            return
+          }
+          partsArray.push(p)
+        }
+
+        const totalLen = partsArray.reduce((s, p) => s + p.byteLength, 0)
+        const assembled = new Uint8Array(totalLen)
+        let off = 0
+        for (const p of partsArray) {
+          assembled.set(p, off)
+          off += p.byteLength
+        }
+
+        fragments.delete(frameNum)
+        window.dispatchEvent(new CustomEvent('videoframe', { detail: { data: assembled.buffer, isKey: entry.isKey, timestamp: entry.timestamp } }))
+      }
+    } catch (e) {
+      console.error('Failed to parse ARCS packet:', e)
+    }
   }
 
   return {

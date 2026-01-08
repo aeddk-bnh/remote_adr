@@ -62,6 +62,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Debug console/log files created during local testing
+mock_server_console*.txt
+web_controller_console*.txt
+device_control_log*.txt
+*_fresh*.txt
+
 # Secrets
 *.key
 *.pem

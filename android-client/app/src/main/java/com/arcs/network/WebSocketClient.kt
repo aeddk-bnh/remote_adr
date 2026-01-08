@@ -1,5 +1,6 @@
 package com.arcs.client.network
 
+import android.util.Log
 import okhttp3.*
 import okio.ByteString
 import timber.log.Timber
@@ -17,6 +18,9 @@ class WebSocketClient(
     private val onDisconnected: (code: Int, reason: String) -> Unit,
     private val onError: (Throwable) -> Unit
 ) {
+    companion object {
+        private const val TAG = "WebSocketClient"
+    }
     
     private var client: OkHttpClient
     private var webSocket: WebSocket? = null
@@ -37,10 +41,13 @@ class WebSocketClient(
     fun connect(jwtToken: String? = null) {
         if (isConnecting || webSocket != null) {
             Timber.w("Already connected or connecting")
+            Log.w(TAG, "Already connected or connecting")
             return
         }
         
         isConnecting = true
+        Log.i(TAG, "Connecting to $serverUrl jwt=${jwtToken != null}")
+        Timber.i("Connecting to %s jwt=%s", serverUrl, jwtToken != null)
         
         val requestBuilder = Request.Builder()
             .url(serverUrl)
@@ -53,11 +60,13 @@ class WebSocketClient(
         
         val request = requestBuilder.build()
         
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+        try {
+            webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 isConnecting = false
-                Timber.i("WebSocket connected: ${response.code}")
-                onConnected()
+                    Timber.i("WebSocket connected: ${response.code}")
+                    Log.i(TAG, "WebSocket connected: ${response.code}")
+                    onConnected()
             }
             
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -79,6 +88,7 @@ class WebSocketClient(
                 isConnecting = false
                 this@WebSocketClient.webSocket = null
                 Timber.i("WebSocket closed: $code $reason")
+                Log.i(TAG, "WebSocket closed: $code $reason")
                 onDisconnected(code, reason)
             }
             
@@ -86,27 +96,40 @@ class WebSocketClient(
                 isConnecting = false
                 this@WebSocketClient.webSocket = null
                 Timber.e(t, "WebSocket error: ${response?.code}")
+                Log.e(TAG, "WebSocket error: ${response?.code} -> ${t.message}")
                 onError(t)
             }
         })
+        } catch (t: Throwable) {
+            isConnecting = false
+            Timber.e(t, "Failed to start WebSocket")
+            Log.e(TAG, "Failed to start WebSocket: ${t.message}")
+            onError(t)
+        }
     }
     
     /**
      * Send text message
      */
     fun sendText(message: String): Boolean {
-        return webSocket?.send(message) ?: false.also {
+        val ok = webSocket?.send(message) ?: false
+        if (!ok) {
             Timber.e("Cannot send message: not connected")
+            Log.w(TAG, "Cannot send message: not connected")
         }
+        return ok
     }
     
     /**
      * Send binary message
      */
     fun sendBinary(data: ByteArray): Boolean {
-        return webSocket?.send(ByteString.of(*data)) ?: false.also {
+        val ok = webSocket?.send(ByteString.of(*data)) ?: false
+        if (!ok) {
             Timber.e("Cannot send binary: not connected")
+            Log.w(TAG, "Cannot send binary: not connected")
         }
+        return ok
     }
     
     /**

@@ -26,7 +26,9 @@ class TouchInjector(
         val mappedY = mapY(y.toFloat())
         
         Timber.d("Tap: ($x,$y) -> ($mappedX,$mappedY)")
-        return service.performTap(mappedX, mappedY)
+        val result = service.performTap(mappedX, mappedY)
+        Timber.i("Tap result: success=%s at (%s,%s)", result, mappedX, mappedY)
+        return result
     }
     
     /**
@@ -51,11 +53,13 @@ class TouchInjector(
         val mappedEndY = mapY(endY.toFloat())
         
         Timber.d("Swipe: ($startX,$startY)->($endX,$endY), ${duration}ms")
-        return service.performSwipe(
+        val result = service.performSwipe(
             mappedStartX, mappedStartY,
             mappedEndX, mappedEndY,
             duration
         )
+        Timber.i("Swipe result: success=%s from (%s,%s) to (%s,%s) dur=%sms", result, mappedStartX, mappedStartY, mappedEndX, mappedEndY, duration)
+        return result
     }
     
     /**
@@ -72,7 +76,9 @@ class TouchInjector(
         val mappedY = mapY(y.toFloat())
         
         Timber.d("Long press: ($x,$y), ${duration}ms")
-        return service.performLongPress(mappedX, mappedY, duration)
+        val result = service.performLongPress(mappedX, mappedY, duration)
+        Timber.i("LongPress result: success=%s at (%s,%s) dur=%sms", result, mappedX, mappedY, duration)
+        return result
     }
     
     /**
@@ -95,11 +101,13 @@ class TouchInjector(
         val mappedCenterY = mapY(centerY.toFloat())
         
         Timber.d("Pinch: center=($centerX,$centerY), $startDistance->$endDistance")
-        return service.performPinch(
+        val result = service.performPinch(
             mappedCenterX, mappedCenterY,
             startDistance.toFloat(), endDistance.toFloat(),
             duration
         )
+        Timber.i("Pinch result: success=%s center=(%s,%s) %s->%s dur=%sms", result, mappedCenterX, mappedCenterY, startDistance, endDistance, duration)
+        return result
     }
     
     /**

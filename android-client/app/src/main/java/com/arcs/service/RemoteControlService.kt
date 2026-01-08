@@ -45,6 +45,15 @@ class RemoteControlService : Service() {
         
         const val ACTION_START = "com.arcs.action.START"
         const val ACTION_STOP = "com.arcs.action.STOP"
+        const val ACTION_SESSION_CREATED = "com.arcs.action.SESSION_CREATED"
+        const val ACTION_CONTROLLER_CONNECTED = "com.arcs.action.CONTROLLER_CONNECTED"
+        const val EXTRA_SESSION_ID = "session_id"
+        const val ACTION_REQUEST_PROJECTION = "com.arcs.action.REQUEST_PROJECTION"
+        // Fallback holder for MediaProjection result Intent in case the Service
+        // instance loses its instance field (service restarts or lifecycle hiccups).
+        // This is a dev-friendly fallback; for production consider a more robust
+        // permission/session flow.
+        var lastProjectionResultData: Intent? = null
         
         /**
          * Start service from activity/context
@@ -87,6 +96,12 @@ class RemoteControlService : Service() {
     private lateinit var touchInjector: TouchInjector
     private lateinit var keyInjector: KeyInjector
     
+    // MediaProjection components
+    private var mediaProjection: android.media.projection.MediaProjection? = null
+    private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
+    private var projectionResultCode: Int = -1
+    private var projectionResultData: Intent? = null
+    
     private var sessionKey: SecretKey? = null
     private var jwtToken: String? = null
     private var isRunning = false
@@ -100,6 +115,17 @@ class RemoteControlService : Service() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Log received start intent for debugging: action, projection extras, and server URL
+        try {
+            val action = intent?.action
+            val receivedResultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
+            val hasResultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA) != null
+            val serverUrl = intent?.getStringExtra(EXTRA_SERVER_URL) ?: BuildConfig.SERVER_URL
+            Timber.i("onStartCommand action=%s resultCode=%d hasResultData=%s serverUrl=%s", action, receivedResultCode, hasResultData, serverUrl)
+        } catch (e: Exception) {
+            Timber.w(e, "Error logging start intent extras")
+        }
+
         when (intent?.action) {
             ACTION_START -> {
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
@@ -107,8 +133,28 @@ class RemoteControlService : Service() {
                 val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL) ?: BuildConfig.SERVER_URL
                 val deviceSecret = intent.getStringExtra(EXTRA_DEVICE_SECRET)
                 
-                if (resultCode != -1 && resultData != null) {
-                    startService(resultCode, resultData, serverUrl, deviceSecret)
+                // Ensure we call startForeground promptly to avoid the system killing the
+                // service when started via startForegroundService(). If we don't yet have
+                // a MediaProjection result (resultCode/resultData), publish a lightweight
+                // notification and wait for the Activity to re-send the start with results.
+                if (resultData != null) {
+                    // If resultCode wasn't provided by the caller, assume RESULT_OK
+                    val storedResultCode = if (resultCode != -1) resultCode else android.app.Activity.RESULT_OK
+                    // Store projection result for later use
+                    projectionResultCode = storedResultCode
+                    projectionResultData = resultData
+                    // persist a copy in companion as a fallback
+                    lastProjectionResultData = resultData
+                    Timber.i("Persisted projection result in companion (pid=%d)", android.os.Process.myPid())
+                    startService(storedResultCode, resultData, serverUrl, deviceSecret)
+                } else {
+                    // If the service wasn't started with projection data, still enter
+                    // foreground to satisfy platform requirements.
+                    try {
+                        startForeground(NOTIFICATION_ID, createNotification("Initializing..."))
+                    } catch (e: Exception) {
+                        Timber.e(e, "Failed to start foreground notification")
+                    }
                 }
             }
             ACTION_STOP -> {
@@ -141,11 +187,8 @@ class RemoteControlService : Service() {
         
         keyInjector = KeyInjector()
         
-        commandDispatcher = CommandDispatcher(
-            touchInjector,
-            keyInjector,
-            serviceScope
-        )
+        // commandDispatcher will be created when WebSocket client exists so we
+        // can attach an ack callback that uses the socket to report results.
         
         screenCapturer = ScreenCapturer(
             this,
@@ -201,6 +244,26 @@ class RemoteControlService : Service() {
                 handleError(error)
             }
         )
+
+        // Create command dispatcher now that we have a websocket client and
+        // can send command acknowledgements back to the controller/server.
+        commandDispatcher = CommandDispatcher(
+            touchInjector,
+            keyInjector,
+            serviceScope,
+            onCommandResult = { resultJson ->
+                try {
+                    if (this::webSocketClient.isInitialized && webSocketClient.isConnected()) {
+                        webSocketClient.sendText(resultJson)
+                        Timber.d("Sent command ack: %s", resultJson.take(200))
+                    } else {
+                        Timber.w("WebSocket not connected; cannot send command ack")
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to send command ack")
+                }
+            }
+        )
         
         // Connect to server
         webSocketClient.connect()
@@ -214,15 +277,48 @@ class RemoteControlService : Service() {
      */
     private fun stopService() {
         if (!isRunning) return
+
+        // Stop capture pipeline first
+        stopScreenCapture()
         
-        videoEncoder.stop()
-        screenCapturer.stop()
-        webSocketClient.disconnect()
-        
+        try {
+            if (this::videoEncoder.isInitialized) {
+                videoEncoder.stop()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error stopping videoEncoder")
+        }
+
+        try {
+            if (this::screenCapturer.isInitialized) {
+                screenCapturer.stop()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error stopping screenCapturer")
+        }
+
+        try {
+            if (this::webSocketClient.isInitialized) {
+                webSocketClient.disconnect()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error disconnecting webSocketClient")
+        }
+
         isRunning = false
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-        
+
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (e: Exception) {
+            Timber.e(e, "Error stopping foreground")
+        }
+
+        try {
+            stopSelf()
+        } catch (e: Exception) {
+            Timber.e(e, "Error calling stopSelf")
+        }
+
         Timber.i("Service stopped")
     }
     
@@ -244,6 +340,19 @@ class RemoteControlService : Service() {
         
         webSocketClient.sendText(gson.toJson(authRequest))
         
+        // Also send a device_hello for simple mock servers that expect it
+        try {
+            val hello = mapOf(
+                "type" to "device_hello",
+                "sender" to deviceInfo.deviceId,
+                "device_info" to deviceInfo.toMap(),
+                "timestamp" to System.currentTimeMillis()
+            )
+            webSocketClient.sendText(gson.toJson(hello))
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to send device_hello")
+        }
+        
         updateNotification("Connected")
     }
     
@@ -258,6 +367,32 @@ class RemoteControlService : Service() {
             when (type) {
                 "auth_response" -> handleAuthResponse(message)
                 "join_response" -> handleJoinResponse(message)
+                // Mock server uses session_joined / session_created / controller_connected
+                "session_joined" -> handleJoinResponse(message)
+                "session_created" -> {
+                    val sessionId = json["session_id"] as? String
+                    Timber.i("Session created by server: %s", sessionId)
+                    // Broadcast session id so UI can display it
+                    try {
+                        val intent = Intent(ACTION_SESSION_CREATED).apply {
+                            putExtra(EXTRA_SESSION_ID, sessionId)
+                        }
+                        sendBroadcast(intent)
+                    } catch (e: Exception) {
+                        Timber.w(e, "Failed to broadcast session_created")
+                    }
+                }
+                "controller_connected" -> {
+                    Timber.i("Controller connected -> starting streaming")
+                    handleJoinResponse(message)
+                    // notify UI that controller connected
+                    try {
+                        val intent = Intent(ACTION_CONTROLLER_CONNECTED)
+                        sendBroadcast(intent)
+                    } catch (e: Exception) {
+                        Timber.w(e, "Failed to broadcast controller_connected")
+                    }
+                }
                 else -> commandDispatcher.dispatch(message)
             }
         } catch (e: Exception) {
@@ -321,9 +456,125 @@ class RemoteControlService : Service() {
      * Start screen capture pipeline
      */
     private fun startScreenCapture() {
-        // TODO: Get MediaProjection result from Activity
-        // For now, this is a placeholder
-        Timber.i("Screen capture pipeline ready")
+        // If this instance doesn't have the projection data (may happen if the
+        // service was restarted or the extras were not delivered), try the
+        // companion fallback saved when the Activity originally provided the
+        // MediaProjection Intent.
+        if (projectionResultCode == -1 || projectionResultData == null) {
+            Timber.w("startScreenCapture: missing projection (projCode=%d, projDataNull=%s) pid=%d",
+                projectionResultCode,
+                (projectionResultData == null).toString(),
+                android.os.Process.myPid())
+
+            if (lastProjectionResultData != null) {
+                Timber.i("Using fallback projection data from companion holder (pid=%d)", android.os.Process.myPid())
+                projectionResultData = lastProjectionResultData
+                projectionResultCode = android.app.Activity.RESULT_OK
+            } else {
+                Timber.e("Cannot start capture: no MediaProjection result - requesting projection from Activity")
+                // Ask the Activity to re-request the MediaProjection permission so the user can grant it again
+                try {
+                    val intent = Intent(ACTION_REQUEST_PROJECTION)
+                    sendBroadcast(intent)
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to broadcast ACTION_REQUEST_PROJECTION")
+                }
+                return
+            }
+        }
+        
+        try {
+            Timber.i("Starting screen capture pipeline")
+            
+            // Get MediaProjection
+            val mediaProjectionManager = getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE) 
+                as android.media.projection.MediaProjectionManager
+            mediaProjection = mediaProjectionManager.getMediaProjection(projectionResultCode, projectionResultData!!)
+            
+            if (mediaProjection == null) {
+                Timber.e("Failed to obtain MediaProjection")
+                updateNotification("Capture failed")
+                return
+            }
+            
+            // Start video encoder and get input surface
+            val encoderSurface = videoEncoder.start { buffer, info ->
+                // Encode callback: packetize and send via WebSocket
+                try {
+                    val isKeyFrame = (info.flags and android.media.MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                    val packets = framePacketizer.packetize(buffer, info, isKeyFrame, false)
+                    
+                    // Send each packet
+                    packets.forEach { packet ->
+                        if (this::webSocketClient.isInitialized && webSocketClient.isConnected()) {
+                            webSocketClient.sendBinary(packet)
+                        }
+                    }
+                    
+                    if (isKeyFrame) {
+                        Timber.d("Sent keyframe #${info.presentationTimeUs / 1000}ms, ${info.size} bytes")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Error packetizing/sending frame")
+                }
+            }
+            
+            if (encoderSurface == null) {
+                Timber.e("Failed to start video encoder")
+                updateNotification("Encoder failed")
+                mediaProjection?.stop()
+                mediaProjection = null
+                return
+            }
+            
+            // Create VirtualDisplay to render screen to encoder surface
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ARCS_Capture",
+                deviceInfo.screenWidth,
+                deviceInfo.screenHeight,
+                deviceInfo.densityDpi,
+                android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
+                encoderSurface,
+                null,
+                null
+            )
+            
+            if (virtualDisplay == null) {
+                Timber.e("Failed to create VirtualDisplay")
+                updateNotification("Display failed")
+                videoEncoder.stop()
+                mediaProjection?.stop()
+                mediaProjection = null
+                return
+            }
+            
+            Timber.i("Screen capture pipeline started successfully")
+            updateNotification("Streaming")
+            
+        } catch (e: Exception) {
+            Timber.e(e, "Error starting screen capture")
+            updateNotification("Capture error")
+            stopScreenCapture()
+        }
+    }
+    
+    /**
+     * Stop screen capture pipeline
+     */
+    private fun stopScreenCapture() {
+        try {
+            virtualDisplay?.release()
+            virtualDisplay = null
+        } catch (e: Exception) {
+            Timber.e(e, "Error releasing VirtualDisplay")
+        }
+        
+        try {
+            mediaProjection?.stop()
+            mediaProjection = null
+        } catch (e: Exception) {
+            Timber.e(e, "Error stopping MediaProjection")
+        }
     }
     
     /**

@@ -1,4 +1,4 @@
-package com.arcs.ui
+package com.arcs.client.ui
 
 import android.content.Intent
 import android.net.Uri

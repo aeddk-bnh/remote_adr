@@ -1,15 +1,25 @@
-package com.arcs.ui
+package com.arcs.client.ui
 
+import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.widget.Toast
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.arcs.client.core.PermissionManager
@@ -28,6 +38,46 @@ import timber.log.Timber
 class MainActivity : ComponentActivity() {
     
     private lateinit var permissionManager: PermissionManager
+    private val isServiceRunningState = mutableStateOf(false)
+    private val sessionIdState = mutableStateOf("")
+    private val deviceConnectedState = mutableStateOf(false)
+
+    private val sessionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent == null) return
+            when (intent.action) {
+                RemoteControlService.ACTION_SESSION_CREATED -> {
+                    val id = intent.getStringExtra(RemoteControlService.EXTRA_SESSION_ID) ?: ""
+                    Timber.i("Received session_created broadcast: %s", id)
+                    sessionIdState.value = id
+                    try {
+                        Toast.makeText(this@MainActivity, "Session ID: $id", Toast.LENGTH_LONG).show()
+                    } catch (e: Exception) {
+                        Timber.w(e, "Failed to show session toast")
+                    }
+                }
+                RemoteControlService.ACTION_CONTROLLER_CONNECTED -> {
+                    Timber.i("Received controller_connected broadcast")
+                    deviceConnectedState.value = true
+                }
+                RemoteControlService.ACTION_REQUEST_PROJECTION -> {
+                    Timber.i("Received request to re-acquire MediaProjection from service")
+                    // Trigger the MediaProjection request flow in the Activity
+                    requestMediaProjection()
+                }
+            }
+        }
+    }
+    private val mediaProjectionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            Timber.i("MediaProjection granted, starting service")
+            startServiceWithProjection(result.resultCode, result.data!!)
+        } else {
+            Timber.w("MediaProjection denied")
+        }
+    }
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,7 +92,10 @@ class MainActivity : ComponentActivity() {
                 ) {
                     MainScreen(
                         permissionManager = permissionManager,
-                        onNavigateToSettings = { navigateToSettings() }
+                        onNavigateToSettings = { navigateToSettings() },
+                        isServiceRunningState = isServiceRunningState,
+                        sessionIdState = sessionIdState,
+                        deviceConnectedState = deviceConnectedState
                     )
                 }
             }
@@ -50,6 +103,22 @@ class MainActivity : ComponentActivity() {
         
         // Check permissions on startup
         checkAndRequestPermissions()
+        // Register receiver for session updates
+        registerReceiver(
+            sessionReceiver,
+            IntentFilter(RemoteControlService.ACTION_SESSION_CREATED).apply {
+                addAction(RemoteControlService.ACTION_CONTROLLER_CONNECTED)
+            }
+        )
+    }
+
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(sessionReceiver)
+        } catch (e: Exception) {
+            Timber.w(e, "Error unregistering sessionReceiver")
+        }
+        super.onDestroy()
     }
     
     private fun checkAndRequestPermissions() {
@@ -61,6 +130,27 @@ class MainActivity : ComponentActivity() {
     
     private fun navigateToSettings() {
         startActivity(Intent(this, SettingsActivity::class.java))
+    }
+    
+    internal fun requestMediaProjection() {
+        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val intent = mediaProjectionManager.createScreenCaptureIntent()
+        mediaProjectionLauncher.launch(intent)
+    }
+    
+    private fun startServiceWithProjection(resultCode: Int, data: Intent) {
+            val intent = Intent(this, RemoteControlService::class.java).apply {
+            action = RemoteControlService.ACTION_START
+            putExtra(RemoteControlService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(RemoteControlService.EXTRA_RESULT_DATA, data)
+            // Use localhost so `adb reverse tcp:8080 tcp:8080` works during USB testing
+            putExtra(RemoteControlService.EXTRA_SERVER_URL, "ws://127.0.0.1:8080") // TODO: get from settings
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
     
     override fun onRequestPermissionsResult(
@@ -76,13 +166,32 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     permissionManager: PermissionManager,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    isServiceRunningState: androidx.compose.runtime.MutableState<Boolean>,
+    sessionIdState: androidx.compose.runtime.MutableState<String>,
+    deviceConnectedState: androidx.compose.runtime.MutableState<Boolean>
 ) {
     val context = LocalContext.current
-    var isServiceRunning by remember { mutableStateOf(false) }
-    var sessionId by remember { mutableStateOf("") }
-    var deviceConnected by remember { mutableStateOf(false) }
+    var isServiceRunning by isServiceRunningState
+    var sessionId by sessionIdState
+    var deviceConnected by deviceConnectedState
     var hasPermissions by remember { mutableStateOf(permissionManager.hasAllRequiredPermissions()) }
+
+    // Refresh permission state when the activity resumes (e.g. after user enabled Accessibility/IME in Settings)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasPermissions = permissionManager.hasAllRequiredPermissions()
+                Timber.d("MainScreen.onResume: hasPermissions=%s, missing=%s",
+                    hasPermissions,
+                    permissionManager.checkAllPermissions().getMissingPermissions().joinToString(", ")
+                )
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     
     @OptIn(ExperimentalMaterial3Api::class)
     Scaffold(
@@ -242,10 +351,10 @@ fun MainScreen(
                             deviceConnected = false
                         } else {
                             if (hasPermissions) {
-                                com.arcs.client.service.RemoteControlService.start(context)
+                                // Request MediaProjection permission first
+                                (context as? MainActivity)?.requestMediaProjection()
                                 isServiceRunning = true
-                                // In real implementation, get session ID from service
-                                sessionId = "DEMO-SESSION-${System.currentTimeMillis() % 10000}"
+                                // sessionId will be populated when the server replies with session_created
                             }
                         }
                     },
@@ -290,6 +399,22 @@ fun MainScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(vertical = 8.dp)
             )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            OutlinedButton(onClick = {
+                                // Manual refresh in case lifecycle observer didn't update
+                                hasPermissions = permissionManager.hasAllRequiredPermissions()
+                            }) {
+                                Text("Refresh Permissions")
+                            }
+
+                            OutlinedButton(onClick = {
+                                // Guide user to settings again
+                                permissionManager.requestAllPermissions(context as ComponentActivity)
+                            }) {
+                                Text("Open Settings")
+                            }
+                        }
         }
     }
 }
