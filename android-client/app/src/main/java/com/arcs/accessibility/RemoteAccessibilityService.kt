@@ -115,6 +115,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
             
             val success = dispatchGesture(gesture, callback, null)
+            Timber.d("dispatchGesture returned=%s", success)
             if (!success) {
                 if (continuation.isActive) {
                     Timber.e("Failed to dispatch gesture")
@@ -145,11 +146,23 @@ class RemoteAccessibilityService : AccessibilityService() {
         endY: Float,
         duration: Long
     ): GestureDescription {
+        // Build a path with interpolated intermediate points to improve
+        // gesture reliability across devices and OEM implementations.
         val path = Path().apply {
             moveTo(startX, startY)
-            lineTo(endX, endY)
         }
-        
+
+        // Determine number of interpolation steps based on duration (approx 60Hz sampling)
+        val stepMs = 16 // approx frame interval
+        val steps = (duration / stepMs).coerceIn(2, 60).toInt()
+
+        for (i in 1..steps) {
+            val t = i.toFloat() / steps.toFloat()
+            val ix = startX + (endX - startX) * t
+            val iy = startY + (endY - startY) * t
+            path.lineTo(ix, iy)
+        }
+
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         return GestureDescription.Builder().addStroke(stroke).build()
     }

@@ -25,6 +25,12 @@ import androidx.compose.ui.unit.dp
 import com.arcs.client.core.PermissionManager
 import com.arcs.client.service.RemoteControlService
 import timber.log.Timber
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * Main Activity for ARCS Android Client
@@ -41,6 +47,8 @@ class MainActivity : ComponentActivity() {
     private val isServiceRunningState = mutableStateOf(false)
     private val sessionIdState = mutableStateOf("")
     private val deviceConnectedState = mutableStateOf(false)
+    
+    private var sessionPollingJob: Job? = null
 
     private val sessionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -49,9 +57,11 @@ class MainActivity : ComponentActivity() {
                 RemoteControlService.ACTION_SESSION_CREATED -> {
                     val id = intent.getStringExtra(RemoteControlService.EXTRA_SESSION_ID) ?: ""
                     Timber.i("Received session_created broadcast: %s", id)
+                    // Force UI update immediately
                     sessionIdState.value = id
+                    Timber.i("Updated sessionIdState to: %s", id)
                     try {
-                        Toast.makeText(this@MainActivity, "Session ID: $id", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@MainActivity, "New Session: $id", Toast.LENGTH_LONG).show()
                     } catch (e: Exception) {
                         Timber.w(e, "Failed to show session toast")
                     }
@@ -74,6 +84,8 @@ class MainActivity : ComponentActivity() {
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             Timber.i("MediaProjection granted, starting service")
             startServiceWithProjection(result.resultCode, result.data!!)
+            // Start polling for session ID updates
+            startSessionPolling()
         } else {
             Timber.w("MediaProjection denied")
         }
@@ -95,7 +107,9 @@ class MainActivity : ComponentActivity() {
                         onNavigateToSettings = { navigateToSettings() },
                         isServiceRunningState = isServiceRunningState,
                         sessionIdState = sessionIdState,
-                        deviceConnectedState = deviceConnectedState
+                        deviceConnectedState = deviceConnectedState,
+                        onStartSessionPolling = { startSessionPolling() },
+                        onStopSessionPolling = { stopSessionPolling() }
                     )
                 }
             }
@@ -104,12 +118,31 @@ class MainActivity : ComponentActivity() {
         // Check permissions on startup
         checkAndRequestPermissions()
         // Register receiver for session updates
-        registerReceiver(
-            sessionReceiver,
-            IntentFilter(RemoteControlService.ACTION_SESSION_CREATED).apply {
-                addAction(RemoteControlService.ACTION_CONTROLLER_CONNECTED)
+        // Register receiver for session updates and projection requests
+        val filter = IntentFilter(RemoteControlService.ACTION_SESSION_CREATED).apply {
+            addAction(RemoteControlService.ACTION_CONTROLLER_CONNECTED)
+            addAction(RemoteControlService.ACTION_REQUEST_PROJECTION)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(sessionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(sessionReceiver, filter)
+        }
+
+        // Load last known session id from SharedPreferences in case the service
+        // created the session before the Activity was ready to receive the
+        // broadcast.
+        try {
+            val prefs = getSharedPreferences("arcs_prefs", Context.MODE_PRIVATE)
+            val last = prefs.getString("last_session_id", "") ?: ""
+            if (last.isNotEmpty()) {
+                Timber.i("Loaded last_session_id from prefs: %s", last)
+                sessionIdState.value = last
             }
-        )
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to load last_session_id from prefs")
+        }
     }
 
     override fun onDestroy() {
@@ -118,7 +151,39 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Timber.w(e, "Error unregistering sessionReceiver")
         }
+        stopSessionPolling()
         super.onDestroy()
+    }
+    
+    private fun startSessionPolling() {
+        stopSessionPolling()
+        sessionPollingJob = CoroutineScope(Dispatchers.Main).launch {
+            while (isActive) {
+                try {
+                    val prefs = getSharedPreferences("arcs_prefs", Context.MODE_PRIVATE)
+                    val currentSession = prefs.getString("last_session_id", "") ?: ""
+                    if (currentSession.isNotEmpty() && currentSession != sessionIdState.value) {
+                        Timber.i("Polling detected new session: %s (old: %s)", currentSession, sessionIdState.value)
+                        sessionIdState.value = currentSession
+                        try {
+                            Toast.makeText(this@MainActivity, "Session: $currentSession", Toast.LENGTH_LONG).show()
+                        } catch (e: Exception) {
+                            Timber.w(e, "Failed to show toast")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Error polling session")
+                }
+                delay(500) // Poll every 500ms
+            }
+        }
+        Timber.i("Started session polling")
+    }
+    
+    private fun stopSessionPolling() {
+        sessionPollingJob?.cancel()
+        sessionPollingJob = null
+        Timber.i("Stopped session polling")
     }
     
     private fun checkAndRequestPermissions() {
@@ -143,7 +208,7 @@ class MainActivity : ComponentActivity() {
             action = RemoteControlService.ACTION_START
             putExtra(RemoteControlService.EXTRA_RESULT_CODE, resultCode)
             putExtra(RemoteControlService.EXTRA_RESULT_DATA, data)
-            // Use localhost so `adb reverse tcp:8080 tcp:8080` works during USB testing
+            // Use 127.0.0.1 with adb reverse (maps device port -> host port)
             putExtra(RemoteControlService.EXTRA_SERVER_URL, "ws://127.0.0.1:8080") // TODO: get from settings
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -169,7 +234,9 @@ fun MainScreen(
     onNavigateToSettings: () -> Unit,
     isServiceRunningState: androidx.compose.runtime.MutableState<Boolean>,
     sessionIdState: androidx.compose.runtime.MutableState<String>,
-    deviceConnectedState: androidx.compose.runtime.MutableState<Boolean>
+    deviceConnectedState: androidx.compose.runtime.MutableState<Boolean>,
+    onStartSessionPolling: () -> Unit = {},
+    onStopSessionPolling: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var isServiceRunning by isServiceRunningState
@@ -349,8 +416,15 @@ fun MainScreen(
                             isServiceRunning = false
                             sessionId = ""
                             deviceConnected = false
+                            // Stop polling when service stops
+                            sessionIdState.value = ""
+                            onStopSessionPolling()
                         } else {
                             if (hasPermissions) {
+                                // Clear old session ID before starting new service
+                                sessionId = ""
+                                sessionIdState.value = ""
+                                Timber.i("Cleared old session ID, starting new service")
                                 // Request MediaProjection permission first
                                 (context as? MainActivity)?.requestMediaProjection()
                                 isServiceRunning = true

@@ -36,9 +36,29 @@ class FramePacketizer(
         isKeyFrame: Boolean = false,
         isEncrypted: Boolean = false
     ): List<ByteArray> {
-        val frameData = ByteArray(info.size)
+        // Defensive checks
+        if (info.size <= 0) {
+            Timber.w("[FramePacketizer] Invalid frame size: %d", info.size)
+            return emptyList()
+        }
+        
+        if (info.offset < 0 || info.offset + info.size > data.capacity()) {
+            Timber.e("[FramePacketizer] Invalid buffer bounds: offset=%d, size=%d, capacity=%d",
+                info.offset, info.size, data.capacity())
+            return emptyList()
+        }
+        
+        // Ensure ByteBuffer is positioned correctly
         data.position(info.offset)
-        data.get(frameData, 0, info.size)
+        data.limit(info.offset + info.size)
+        
+        val frameData = ByteArray(info.size)
+        try {
+            data.get(frameData, 0, info.size)
+        } catch (e: Exception) {
+            Timber.e(e, "[FramePacketizer] Error reading from ByteBuffer")
+            return emptyList()
+        }
         
         val packets = mutableListOf<ByteArray>()
         val timestamp = info.presentationTimeUs
@@ -57,6 +77,8 @@ class FramePacketizer(
                 false
             )
             packets.add(packet)
+            Timber.d("[FramePacketizer] Frame #%d: single packet, size=%d bytes, isKey=%s, ts=%d us",
+                frameNumber.toInt(), packet.size, isKeyFrame, timestamp)
         } else {
             // Fragment into multiple packets
             var offset = 0
@@ -110,7 +132,6 @@ class FramePacketizer(
         
         val packet = ByteArray(totalSize)
         var offset = 0
-        
         // Magic (4 bytes)
         System.arraycopy(MAGIC, 0, packet, offset, 4)
         offset += 4
@@ -168,7 +189,7 @@ class FramePacketizer(
         packet[offset++] = (crc shr 24).toByte()
         packet[offset++] = (crc shr 16).toByte()
         packet[offset++] = (crc shr 8).toByte()
-        packet[offset] = crc.toByte()
+        packet[offset] = crc.toByte()  // Last byte - no increment
         
         return packet
     }

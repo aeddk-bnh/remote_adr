@@ -83,6 +83,9 @@ class VideoEncoder(
                         val outputBuffer = codec.getOutputBuffer(index) ?: return
                         
                         if (info.size > 0) {
+                            val isKeyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                            Timber.d("[VideoEncoder] Frame encoded: size=%d bytes, pts=%d us, flags=0x%02X, isKey=%s",
+                                info.size, info.presentationTimeUs, info.flags, isKeyFrame)
                             onEncodedData(outputBuffer, info)
                         }
                         

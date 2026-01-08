@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.Context
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
@@ -245,6 +246,8 @@ class RemoteControlService : Service() {
             }
         )
 
+        Timber.i("Initializing WebSocket client with URL=%s", serverUrl)
+
         // Create command dispatcher now that we have a websocket client and
         // can send command acknowledgements back to the controller/server.
         commandDispatcher = CommandDispatcher(
@@ -266,7 +269,13 @@ class RemoteControlService : Service() {
         )
         
         // Connect to server
-        webSocketClient.connect()
+        try {
+            Timber.i("Connecting WebSocket to %s", serverUrl)
+            webSocketClient.connect()
+            Timber.i("WebSocket.connect() returned (async)")
+        } catch (e: Exception) {
+            Timber.e(e, "Exception while calling webSocketClient.connect()")
+        }
         isRunning = true
         
         Timber.i("Service started")
@@ -278,6 +287,7 @@ class RemoteControlService : Service() {
     private fun stopService() {
         if (!isRunning) return
 
+        Timber.i("Stopping service - keeping session_id in prefs for debugging")
         // Stop capture pipeline first
         stopScreenCapture()
         
@@ -327,7 +337,7 @@ class RemoteControlService : Service() {
      */
     private fun handleConnected(deviceSecret: String?) {
         Timber.i("Connected to server")
-        
+
         // Send authentication request
         val authRequest = mapOf(
             "type" to "auth_request",
@@ -337,9 +347,15 @@ class RemoteControlService : Service() {
             "secret" to (deviceSecret ?: ""),
             "timestamp" to System.currentTimeMillis()
         )
-        
-        webSocketClient.sendText(gson.toJson(authRequest))
-        
+
+        try {
+            val authJson = gson.toJson(authRequest)
+            Timber.i("Sending auth_request: %s", authJson.take(1000))
+            webSocketClient.sendText(authJson)
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to send auth_request")
+        }
+
         // Also send a device_hello for simple mock servers that expect it
         try {
             val hello = mapOf(
@@ -348,11 +364,13 @@ class RemoteControlService : Service() {
                 "device_info" to deviceInfo.toMap(),
                 "timestamp" to System.currentTimeMillis()
             )
-            webSocketClient.sendText(gson.toJson(hello))
+            val helloJson = gson.toJson(hello)
+            Timber.i("Sending device_hello: %s", helloJson.take(1000))
+            webSocketClient.sendText(helloJson)
         } catch (e: Exception) {
             Timber.w(e, "Failed to send device_hello")
         }
-        
+
         updateNotification("Connected")
     }
     
@@ -370,17 +388,33 @@ class RemoteControlService : Service() {
                 // Mock server uses session_joined / session_created / controller_connected
                 "session_joined" -> handleJoinResponse(message)
                 "session_created" -> {
+                    Timber.i(">>> [session_created] START handling")
                     val sessionId = json["session_id"] as? String
                     Timber.i("Session created by server: %s", sessionId)
+                    Timber.i(">>> Creating broadcast intent")
                     // Broadcast session id so UI can display it
                     try {
                         val intent = Intent(ACTION_SESSION_CREATED).apply {
+                            setPackage(packageName) // Make it explicit to this app
                             putExtra(EXTRA_SESSION_ID, sessionId)
                         }
+                        Timber.i(">>> Sending broadcast with sessionId=%s to package=%s", sessionId, packageName)
                         sendBroadcast(intent)
+                        Timber.i(">>> Broadcast sent successfully")
+                        // Persist session id to SharedPreferences so Activity can read it
+                        try {
+                            Timber.i(">>> Getting SharedPreferences")
+                            val prefs = getSharedPreferences("arcs_prefs", Context.MODE_PRIVATE)
+                            Timber.i(">>> Saving to prefs: %s", sessionId)
+                            prefs.edit().putString("last_session_id", sessionId ?: "").apply()
+                            Timber.i(">>> Persisted session id to prefs: %s", sessionId)
+                        } catch (e: Exception) {
+                            Timber.w(e, "Failed to persist session id")
+                        }
                     } catch (e: Exception) {
                         Timber.w(e, "Failed to broadcast session_created")
                     }
+                    Timber.i(">>> [session_created] END handling")
                 }
                 "controller_connected" -> {
                     Timber.i("Controller connected -> starting streaming")
@@ -497,7 +531,26 @@ class RemoteControlService : Service() {
                 return
             }
             
+            // Register callback before creating VirtualDisplay (required on Android 14+)
+            val projectionCallback = object : android.media.projection.MediaProjection.Callback() {
+                override fun onStop() {
+                    Timber.i("MediaProjection stopped by system")
+                    stopScreenCapture()
+                }
+                
+                override fun onCapturedContentResize(width: Int, height: Int) {
+                    Timber.i("Captured content resized: %dx%d", width, height)
+                }
+                
+                override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
+                    Timber.i("Captured content visibility changed: %s", isVisible)
+                }
+            }
+            mediaProjection?.registerCallback(projectionCallback, android.os.Handler(android.os.Looper.getMainLooper()))
+            Timber.i("Registered MediaProjection callback")
+            
             // Start video encoder and get input surface
+            Timber.i("[RemoteControlService] Starting video encoder pipeline")
             val encoderSurface = videoEncoder.start { buffer, info ->
                 // Encode callback: packetize and send via WebSocket
                 try {
@@ -505,14 +558,17 @@ class RemoteControlService : Service() {
                     val packets = framePacketizer.packetize(buffer, info, isKeyFrame, false)
                     
                     // Send each packet
+                    var sentCount = 0
                     packets.forEach { packet ->
                         if (this::webSocketClient.isInitialized && webSocketClient.isConnected()) {
-                            webSocketClient.sendBinary(packet)
+                            val sent = webSocketClient.sendBinary(packet)
+                            if (sent) sentCount++
                         }
                     }
                     
                     if (isKeyFrame) {
-                        Timber.d("Sent keyframe #${info.presentationTimeUs / 1000}ms, ${info.size} bytes")
+                        Timber.i("[RemoteControlService] Sent keyframe: packets=%d/%d, size=%d bytes, pts=%d ms",
+                            sentCount, packets.size, info.size, info.presentationTimeUs / 1000)
                     }
                 } catch (e: Exception) {
                     Timber.e(e, "Error packetizing/sending frame")
@@ -533,11 +589,13 @@ class RemoteControlService : Service() {
                 deviceInfo.screenWidth,
                 deviceInfo.screenHeight,
                 deviceInfo.densityDpi,
-                android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
+                android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 encoderSurface,
                 null,
                 null
             )
+            
+            Timber.i("VirtualDisplay created: %s", virtualDisplay?.toString())
             
             if (virtualDisplay == null) {
                 Timber.e("Failed to create VirtualDisplay")

@@ -22,12 +22,13 @@ export function useVideoDecoder(canvasRef: RefObject<HTMLCanvasElement>) {
       output: (frame) => {
         if (!ctxRef.current || !canvasRef.current) return
 
+        console.log('[VideoDecoder] Frame decoded and rendering:', frame.codedWidth, 'x', frame.codedHeight)
         // Draw frame to canvas
         ctxRef.current.drawImage(frame, 0, 0, canvasRef.current.width, canvasRef.current.height)
         frame.close()
       },
       error: (error) => {
-        console.error('Decoder error:', error)
+        console.error('[VideoDecoder] Decoder error:', error)
       },
     })
 
@@ -39,11 +40,12 @@ export function useVideoDecoder(canvasRef: RefObject<HTMLCanvasElement>) {
       hardwareAcceleration: 'prefer-hardware',
     })
 
-    console.log('Video decoder initialized')
+    console.log('[VideoDecoder] Decoder initialized and configured:', width, 'x', height, 'codec: avc1.42E01E')
   }, [canvasRef])
 
   const decodeFrame = useCallback((data: ArrayBuffer, isKey: boolean, timestamp: number) => {
     if (!decoderRef.current || decoderRef.current.state !== 'configured') {
+      console.warn('[VideoDecoder] Decoder not ready, state:', decoderRef.current?.state)
       return
     }
 
@@ -54,9 +56,10 @@ export function useVideoDecoder(canvasRef: RefObject<HTMLCanvasElement>) {
         data: data,
       })
 
+      console.log('[VideoDecoder] Decoding frame: type=', isKey ? 'KEY' : 'DELTA', 'size=', data.byteLength, 'ts=', timestamp)
       decoderRef.current.decode(chunk)
     } catch (error) {
-      console.error('Failed to decode frame:', error)
+      console.error('[VideoDecoder] Failed to decode frame:', error)
     }
   }, [])
 
@@ -65,9 +68,11 @@ export function useVideoDecoder(canvasRef: RefObject<HTMLCanvasElement>) {
     const handleVideoFrame = (event: Event) => {
       const customEvent = event as CustomEvent<{ data: ArrayBuffer, isKey: boolean, timestamp: number }>
       const { data, isKey, timestamp } = customEvent.detail
+      console.log('[VideoDecoder] Received videoframe event: size=', data.byteLength, 'isKey=', isKey, 'ts=', timestamp)
       decodeFrame(data, !!isKey, Number(timestamp))
     }
 
+    console.log('[VideoDecoder] Registering videoframe event listener')
     window.addEventListener('videoframe', handleVideoFrame)
 
     return () => {

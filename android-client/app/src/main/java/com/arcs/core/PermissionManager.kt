@@ -62,24 +62,31 @@ class PermissionManager(private val context: Context) {
     
     /**
      * Check if Accessibility Service is enabled
+     * Note: On Android 14+ (API 34+), reading ENABLED_ACCESSIBILITY_SERVICES is restricted.
+     * We use try-catch to handle SecurityException gracefully.
      */
     fun isAccessibilityServiceEnabled(): Boolean {
-        // Accessibility services may be listed in different forms depending on the device:
-        // - short form: "com.pkg/.accessibility.RemoteAccessibilityService"
-        // - long form:  "com.pkg/com.pkg.accessibility.RemoteAccessibilityService"
-        val shortName = "${context.packageName}/.accessibility.RemoteAccessibilityService"
-        val longName = "${context.packageName}/${context.packageName}.accessibility.RemoteAccessibilityService"
+        return try {
+            val enabledServices = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            )
+            
+            if (enabledServices == null) return false
+            
+            // Accessibility services may be listed in different forms depending on the device:
+            // - short form: "com.pkg/.accessibility.RemoteAccessibilityService"
+            // - long form:  "com.pkg/com.pkg.accessibility.RemoteAccessibilityService"
+            val shortName = "${context.packageName}/.accessibility.RemoteAccessibilityService"
+            val longName = "${context.packageName}/${context.packageName}.accessibility.RemoteAccessibilityService"
 
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        )
-
-        return when {
-            enabledServices == null -> false
-            enabledServices.contains(shortName) -> true
-            enabledServices.contains(longName) -> true
-            else -> false
+            enabledServices.contains(shortName) || enabledServices.contains(longName)
+        } catch (e: SecurityException) {
+            Timber.w(e, "Cannot read accessibility settings on Android 14+, assuming not enabled")
+            false
+        } catch (e: Exception) {
+            Timber.w(e, "Error checking accessibility status")
+            false
         }
     }
     
@@ -95,16 +102,20 @@ class PermissionManager(private val context: Context) {
     
     /**
      * Check if IME is enabled
+     * Note: On Android 14+ (API 34+), we cannot read ENABLED_INPUT_METHODS due to privacy restrictions.
+     * We'll use InputMethodManager to check instead.
      */
     fun isIMEEnabled(): Boolean {
-        val imeName = "${context.packageName}/.input.RemoteIME"
-        
-        val enabledIMEs = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_INPUT_METHODS
-        )
-        
-        return enabledIMEs?.contains(imeName) == true
+        return try {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            val enabledIMEs = imm.enabledInputMethodList
+            val myIME = "${context.packageName}/.input.RemoteIME"
+            
+            enabledIMEs.any { it.id == myIME || it.id == "${context.packageName}/com.arcs.client.input.RemoteIME" }
+        } catch (e: Exception) {
+            Timber.w(e, "Cannot check IME status, assuming not enabled")
+            false
+        }
     }
     
     /**

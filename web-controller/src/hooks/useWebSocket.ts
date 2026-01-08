@@ -152,15 +152,18 @@ export function useWebSocket() {
     const buffer = await blob.arrayBuffer()
     const dv = new DataView(buffer)
 
+    console.log('[WebSocket] Received binary message:', buffer.byteLength, 'bytes')
+
     // Minimal header validation: magic "ARCS"
     try {
       const magic = String.fromCharCode(
         dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)
       )
       if (magic !== 'ARCS') {
-        console.warn('Received non-ARCS packet')
+        console.warn('[WebSocket] Received non-ARCS packet, magic:', magic)
         return
       }
+      console.log('[WebSocket] Valid ARCS packet received')
 
       const version = dv.getUint8(4)
       const type = dv.getUint8(5)
@@ -194,6 +197,7 @@ export function useWebSocket() {
 
       if (!isFragment) {
         // Single-packet frame: dispatch directly
+        console.log('[WebSocket] Dispatching single-packet frame:', frameNum, 'size:', payload.byteLength, 'isKey:', isKey, 'ts:', timestamp)
         window.dispatchEvent(new CustomEvent('videoframe', { detail: { data: payload.buffer, isKey, timestamp } }))
         return
       }
@@ -229,10 +233,11 @@ export function useWebSocket() {
         }
 
         fragments.delete(frameNum)
+        console.log('[WebSocket] Dispatching reassembled frame:', frameNum, 'size:', assembled.byteLength, 'isKey:', entry.isKey, 'ts:', entry.timestamp)
         window.dispatchEvent(new CustomEvent('videoframe', { detail: { data: assembled.buffer, isKey: entry.isKey, timestamp: entry.timestamp } }))
       }
     } catch (e) {
-      console.error('Failed to parse ARCS packet:', e)
+      console.error('[WebSocket] Failed to parse ARCS packet:', e)
     }
   }
 
