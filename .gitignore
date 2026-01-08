@@ -68,6 +68,9 @@ web_controller_console*.txt
 device_control_log*.txt
 *_fresh*.txt
 
+# Local-only logs folder
+/logs/
+
 # Secrets
 *.key
 *.pem
