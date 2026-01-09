@@ -11,6 +11,12 @@ export function useWebSocket() {
 
         websocket.onopen = () => {
           console.log('WebSocket connected')
+          // Ensure binary frames arrive as ArrayBuffer for simpler handling
+          try {
+            websocket.binaryType = 'arraybuffer'
+          } catch (e) {
+            // Some environments may not allow setting binaryType; ignore
+          }
           
           // Send join session message
           const joinMsg = {
@@ -27,6 +33,9 @@ export function useWebSocket() {
         websocket.onmessage = (event) => {
           if (typeof event.data === 'string') {
             handleJsonMessage(event.data)
+          } else if (event.data instanceof ArrayBuffer) {
+            // Already an ArrayBuffer
+            handleBinaryMessage(new Blob([event.data]))
           } else if (event.data instanceof Blob) {
             handleBinaryMessage(event.data)
           }
@@ -196,9 +205,10 @@ export function useWebSocket() {
       const payload = new Uint8Array(buffer, payloadOffset, payloadLen)
 
       if (!isFragment) {
-        // Single-packet frame: dispatch directly
+        // Single-packet frame: copy payload into a standalone ArrayBuffer and dispatch
+        const singleBuf = payload.slice().buffer
         console.log('[WebSocket] Dispatching single-packet frame:', frameNum, 'size:', payload.byteLength, 'isKey:', isKey, 'ts:', timestamp)
-        window.dispatchEvent(new CustomEvent('videoframe', { detail: { data: payload.buffer, isKey, timestamp } }))
+        window.dispatchEvent(new CustomEvent('videoframe', { detail: { data: singleBuf, isKey, timestamp } }))
         return
       }
 
