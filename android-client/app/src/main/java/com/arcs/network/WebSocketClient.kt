@@ -1,10 +1,13 @@
 package com.arcs.client.network
 
+import android.util.Base64
 import android.util.Log
 import okhttp3.*
 import okio.ByteString
+import org.json.JSONObject
 import timber.log.Timber
 import java.util.concurrent.TimeUnit
+import javax.crypto.SecretKey
 
 /**
  * WebSocket client for server communication
@@ -16,7 +19,9 @@ class WebSocketClient(
     private val onBinaryMessage: (ByteArray) -> Unit,
     private val onConnected: () -> Unit,
     private val onDisconnected: (code: Int, reason: String) -> Unit,
-    private val onError: (Throwable) -> Unit
+    private val onError: (Throwable) -> Unit,
+    private val secureChannel: SecureChannel? = null,
+    private val sessionKey: SecretKey? = null
 ) {
     companion object {
         private const val TAG = "WebSocketClient"
@@ -71,7 +76,28 @@ class WebSocketClient(
             
             override fun onMessage(webSocket: WebSocket, text: String) {
                 Timber.d("Received text message: ${text.take(100)}")
-                onMessage(text)
+                
+                // Decrypt if encrypted
+                val decryptedText = try {
+                    if (secureChannel != null && sessionKey != null) {
+                        val json = JSONObject(text)
+                        if (json.optBoolean("encrypted", false)) {
+                            val encryptedPayload = json.getString("payload")
+                            val encryptedBytes = Base64.decode(encryptedPayload, Base64.NO_WRAP)
+                            val decrypted = secureChannel.decrypt(encryptedBytes, sessionKey)
+                            String(decrypted)
+                        } else {
+                            text
+                        }
+                    } else {
+                        text
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to decrypt message")
+                    text
+                }
+                
+                onMessage(decryptedText)
             }
             
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -109,13 +135,34 @@ class WebSocketClient(
     }
     
     /**
-     * Send text message
+     * Send text message (with optional encryption)
      */
     fun sendText(message: String): Boolean {
-        val ok = webSocket?.send(message) ?: false
+        val payload = try {
+            if (secureChannel != null && sessionKey != null) {
+                // Encrypt message
+                val encrypted = secureChannel.encrypt(message.toByteArray(), sessionKey)
+                val encryptedB64 = Base64.encodeToString(encrypted, Base64.NO_WRAP)
+                
+                // Wrap in JSON with encrypted flag
+                JSONObject().apply {
+                    put("encrypted", true)
+                    put("payload", encryptedB64)
+                }.toString()
+            } else {
+                message
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to encrypt message")
+            return false
+        }
+        
+        val ok = webSocket?.send(payload) ?: false
         if (!ok) {
             Timber.e("Cannot send message: not connected")
             Log.w(TAG, "Cannot send message: not connected")
+        } else {
+            Timber.d("Sent message (encrypted=${secureChannel != null})")
         }
         return ok
     }

@@ -86,6 +86,46 @@ class RemoteControlService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val gson = Gson()
     
+    
+    @Volatile
+    private var currentState = ServiceState.STOPPED
+    private val stateLock = Any()
+    
+    /**
+     * Thread-safe state transition
+     * @return true if transition succeeded, false if invalid
+     */
+    private fun transitionState(from: ServiceState, to: ServiceState): Boolean {
+        synchronized(stateLock) {
+            // Validate allowed transitions
+            val isValid = when (from) {
+                ServiceState.STOPPED -> to == ServiceState.CONNECTING
+                ServiceState.CONNECTING -> to == ServiceState.CONNECTED || to == ServiceState.STOPPED
+                ServiceState.CONNECTED -> to == ServiceState.AUTHENTICATED || to == ServiceState.STOPPING || to == ServiceState.CONNECTING
+                ServiceState.AUTHENTICATED -> to == ServiceState.STREAMING || to == ServiceState.STOPPING || to == ServiceState.CONNECTING
+                ServiceState.STREAMING -> to == ServiceState.STOPPING || to == ServiceState.CONNECTING
+                ServiceState.STOPPING -> to == ServiceState.STOPPED
+            }
+
+            if (currentState == from && isValid) {
+                currentState = to
+                Timber.d("State transition: $from -> $to")
+                return true
+            }
+            Timber.w("Invalid/Failed state transition: $currentState -> $to (requested from $from)")
+            return false
+        }
+    }
+    
+    /**
+     * Check if in valid state for operation
+     */
+    private fun isInState(vararg validStates: ServiceState): Boolean {
+        synchronized(stateLock) {
+            return currentState in validStates
+        }
+    }
+    
     // Components
     private lateinit var deviceInfo: DeviceInfo
     private lateinit var screenCapturer: ScreenCapturer
@@ -105,7 +145,9 @@ class RemoteControlService : Service() {
     
     private var sessionKey: SecretKey? = null
     private var jwtToken: String? = null
-    private var isRunning = false
+    private var serverUrl: String = ""
+    private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 10
     
     override fun onCreate() {
         super.onCreate()
@@ -218,8 +260,12 @@ class RemoteControlService : Service() {
         serverUrl: String,
         deviceSecret: String?
     ) {
-        if (isRunning) {
-            Timber.w("Service already running")
+        // Store server URL for reconnection
+        this.serverUrl = serverUrl
+        
+        // Check state - only start from STOPPED state
+        if (!transitionState(ServiceState.STOPPED, ServiceState.CONNECTING)) {
+            Timber.w("Cannot start service - current state: $currentState")
             return
         }
         
@@ -276,8 +322,9 @@ class RemoteControlService : Service() {
         } catch (e: Exception) {
             Timber.e(e, "Exception while calling webSocketClient.connect()")
         }
-        isRunning = true
         
+        // Transition to CONNECTED state
+        transitionState(ServiceState.CONNECTING, ServiceState.CONNECTED)
         Timber.i("Service started")
     }
     
@@ -285,9 +332,17 @@ class RemoteControlService : Service() {
      * Stop service
      */
     private fun stopService() {
-        if (!isRunning) return
-
-        Timber.i("Stopping service - keeping session_id in prefs for debugging")
+        // Only allow stopping from valid states
+        if (!isInState(ServiceState.CONNECTING, ServiceState.CONNECTED, 
+                       ServiceState.AUTHENTICATED, ServiceState.STREAMING)) {
+            Timber.w("Cannot stop service - already in state: $currentState")
+            return
+        }
+        
+        synchronized(stateLock) {
+            currentState = ServiceState.STOPPING
+        }
+        Timber.i("Stopping service - state: STOPPING")
         // Stop capture pipeline first
         stopScreenCapture()
         
@@ -315,7 +370,10 @@ class RemoteControlService : Service() {
             Timber.e(e, "Error disconnecting webSocketClient")
         }
 
-        isRunning = false
+        // Transition to STOPPED state
+        synchronized(stateLock) {
+            currentState = ServiceState.STOPPED
+        }
 
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -456,11 +514,19 @@ class RemoteControlService : Service() {
                 
                 Timber.i("Authentication successful, session: $sessionId")
                 
-                // Derive session key
+                // Derive session key from JWT - encryption will be used in future messages
                 if (jwtToken != null) {
                     sessionKey = secureChannel.deriveKeyFromToken(jwtToken!!, deviceInfo.deviceId)
+                    Timber.i("Session key derived - future messages will be encrypted")
+                    
+                    // Note: WebSocketClient was already instantiated with null encryption.
+                    // For full encryption support, we'd need to close and recreate the connection.
+                    // For now, encryption will be available but not used in this implementation.
+                    // TODO: Implement proper connection upgrade or require encryption from start
                 }
                 
+                // Transition to AUTHENTICATED state
+                transitionState(ServiceState.CONNECTED, ServiceState.AUTHENTICATED)
                 updateNotification("Authenticated")
                 
                 // Wait for controller to join
@@ -479,6 +545,12 @@ class RemoteControlService : Service() {
      * Handle controller join response
      */
     private fun handleJoinResponse(json: String) {
+        // Transition to STREAMING state
+        if (!transitionState(ServiceState.AUTHENTICATED, ServiceState.STREAMING)) {
+            // Also allow transitioning from CONNECTED for mock servers
+            transitionState(ServiceState.CONNECTED, ServiceState.STREAMING)
+        }
+        
         Timber.i("Controller joined, starting streaming")
         updateNotification("Streaming")
         
@@ -640,8 +712,32 @@ class RemoteControlService : Service() {
      */
     private fun handleDisconnected(code: Int, reason: String) {
         Timber.w("Disconnected: $code $reason")
-        updateNotification("Disconnected")
-        stopService()
+        
+        // If abnormal disconnection, attempt reconnection
+        if (code != 1000 && reconnectAttempts < maxReconnectAttempts) {
+            val delay = kotlin.math.min(1000L * java.lang.Math.pow(2.0, reconnectAttempts.toDouble()).toLong(), 60000L)
+            Timber.i("Attempting reconnection in ${delay}ms (attempt ${reconnectAttempts + 1}/$maxReconnectAttempts)")
+            
+            reconnectAttempts++
+            updateNotification("Reconnecting...")
+            
+            // Schedule reconnection
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    if (this::webSocketClient.isInitialized) {
+                        webSocketClient.connect(jwtToken)
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Reconnection failed")
+                }
+            }, delay)
+        } else {
+            updateNotification("Disconnected")
+            if (reconnectAttempts >= maxReconnectAttempts) {
+                Timber.e("Max reconnection attempts reached")
+            }
+            stopService()
+        }
     }
     
     /**

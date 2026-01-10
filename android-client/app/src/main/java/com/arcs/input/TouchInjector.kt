@@ -7,7 +7,7 @@ import timber.log.Timber
  * Handles touch injection commands
  * Maps remote coordinates to device coordinates
  */
-class TouchInjector(
+open class TouchInjector(
     private val screenWidth: Int,
     private val screenHeight: Int
 ) {
@@ -15,7 +15,7 @@ class TouchInjector(
     /**
      * Inject tap at specified coordinates
      */
-    suspend fun tap(x: Int, y: Int): Boolean {
+    open suspend fun tap(x: Int, y: Int): Boolean {
         val service = RemoteAccessibilityService.getInstance()
         if (service == null) {
             Timber.e("AccessibilityService not available")
@@ -34,7 +34,7 @@ class TouchInjector(
     /**
      * Inject swipe gesture
      */
-    suspend fun swipe(
+    open suspend fun swipe(
         startX: Int,
         startY: Int,
         endX: Int,
@@ -65,7 +65,7 @@ class TouchInjector(
     /**
      * Inject long press
      */
-    suspend fun longPress(x: Int, y: Int, duration: Long = 1000): Boolean {
+    open suspend fun longPress(x: Int, y: Int, duration: Long = 1000): Boolean {
         val service = RemoteAccessibilityService.getInstance()
         if (service == null) {
             Timber.e("AccessibilityService not available")
@@ -84,7 +84,7 @@ class TouchInjector(
     /**
      * Inject pinch/zoom gesture
      */
-    suspend fun pinch(
+    open suspend fun pinch(
         centerX: Int,
         centerY: Int,
         startDistance: Int,

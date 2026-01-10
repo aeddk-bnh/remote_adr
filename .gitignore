@@ -34,6 +34,8 @@ out/
 
 # Server
 server/build/
+server/tests/build/
+server/tests/bin/
 server/*.o
 server/*.so
 server/arcs-server

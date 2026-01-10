@@ -215,7 +215,23 @@ void ConnectionHandler::handle_auth_request(
     std::string device_id = msg["device_id"];
     std::string secret = msg["secret"];
     
-    // TODO: Validate device credentials
+    // Validate device credentials using DeviceRegistry
+    if (device_registry_) {
+        if (!device_registry_->authenticate(device_id, secret)) {
+            std::cerr << "Authentication failed for device: " << device_id << std::endl;
+            
+            std::string error = MessageParser::create_error(
+                "ERR_AUTH_FAILED",
+                "Invalid device credentials"
+            );
+            send(connection_id, error);
+            return;
+        }
+        std::cout << "Device authenticated via registry: " << device_id << std::endl;
+    } else {
+        // Fallback: Accept any device if registry not configured (development mode)
+        std::cout << "WARNING: DeviceRegistry not configured, accepting device: " << device_id << std::endl;
+    }
     
     // Create session
     std::string session_id = session_manager_->create_session(device_id);

@@ -5,6 +5,7 @@
 #include <functional>
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
+#include "../auth/device_registry.h"
 
 namespace arcs {
 namespace websocket {
@@ -110,6 +111,7 @@ private:
     
     server ws_server_;
     std::shared_ptr<SessionManager> session_manager_;
+    std::shared_ptr<auth::DeviceRegistry> device_registry_;
     std::map<std::string, std::shared_ptr<ConnectionInfo>> connections_;
     std::map<connection_hdl, std::string, std::owner_less<connection_hdl>> hdl_to_id_;
     std::mutex connections_mutex_;

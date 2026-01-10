@@ -6,12 +6,12 @@ import timber.log.Timber
 /**
  * Handles keyboard input injection
  */
-class KeyInjector {
+open class KeyInjector {
     
     /**
      * Send text via IME
      */
-    fun sendText(text: String): Boolean {
+    open fun sendText(text: String): Boolean {
         val ime = RemoteIME.getInstance()
         if (ime == null) {
             Timber.e("RemoteIME not available")
@@ -25,7 +25,7 @@ class KeyInjector {
     /**
      * Send keycode
      */
-    fun sendKeyCode(keyCode: Int): Boolean {
+    open fun sendKeyCode(keyCode: Int): Boolean {
         val ime = RemoteIME.getInstance()
         if (ime == null) {
             Timber.e("RemoteIME not available")
@@ -40,7 +40,7 @@ class KeyInjector {
      * Send key combination (e.g., Ctrl+C)
      * Note: Limited support on Android
      */
-    fun sendKeyCombination(vararg keyCodes: Int): Boolean {
+    open fun sendKeyCombination(vararg keyCodes: Int): Boolean {
         // Android has limited support for key combinations
         // This is a simplified implementation
         var success = true
@@ -53,7 +53,7 @@ class KeyInjector {
     /**
      * Map keycode name string to Android KeyEvent constant
      */
-    fun parseKeyCode(keyCodeName: String): Int {
+    open fun parseKeyCode(keyCodeName: String): Int {
         return when (keyCodeName.uppercase()) {
             "KEYCODE_BACK" -> KeyEvent.KEYCODE_BACK
             "KEYCODE_HOME" -> KeyEvent.KEYCODE_HOME

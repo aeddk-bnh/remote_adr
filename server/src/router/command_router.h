@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include "../security/rate_limiter.h"
 
 namespace arcs {
 namespace router {
@@ -14,6 +15,11 @@ using json = nlohmann::json;
  */
 class CommandRouter {
 public:
+    /**
+     * Set rate limiter instance
+     */
+    static void set_rate_limiter(std::shared_ptr<security::RateLimiter> limiter);
+    
     /**
      * Route command from controller to device
      * @return Routed message or empty string if routing failed
@@ -41,7 +47,17 @@ public:
      * Sanitize command (remove sensitive data for logging)
      */
     static json sanitize_command(const json& command);
+    
+    /**
+     * Check rate limit for command
+     * @return true if allowed, false if rate limited
+     */
+    static bool check_rate_limit(const std::string& session_id, const json& command);
+
+private:
+    static std::shared_ptr<security::RateLimiter> rate_limiter_;
 };
 
 } // namespace router
 } // namespace arcs
+
